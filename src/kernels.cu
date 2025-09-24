@@ -258,8 +258,7 @@ __global__ void flash_fwd_kernel(
     // GQA头映射
     const int gqa_ratio = num_q_heads / num_kv_heads;
     const int kv_head_idx = q_head_idx / gqa_ratio;
-    if (kv_head_idx >= num_kv_heads) return; 
-
+    
     // Q块起始行
     const int q_block_start_row = row_block_idx * Br;
     const int thread_id = threadIdx.x;
@@ -344,6 +343,9 @@ __global__ void flash_fwd_kernel(
 
                 // Causal Mask
                 int k_global_col = col_block_start + k_local_col;
+                if (k_global_col >= seq_len_k) {
+                    s_scores[i][k_local_col] = -INFINITY;
+                }
                 if (is_causal && k_global_col > q_global_row) {
                     s_scores[i][k_local_col] = -INFINITY;
                 }
@@ -399,8 +401,6 @@ __global__ void flash_fwd_kernel(
     }
 }
 
-
-
 // --- Kernel 分发器 ---
 // 这个函数根据运行时的 head_dim 选择一个编译好的 kernel 版本
 template <typename T>
@@ -415,6 +415,12 @@ void launch_flash_fwd_kernel(
 
     dim3 grid(batch_size, query_heads, (target_seq_len + Br - 1) / Br);
     dim3 block(BLOCK_SIZE);
+    // throw std::runtime_error("Unsupported head_dim in flashAttention. "
+    //                            "Please compile a kernel version for head_dim=" + std::to_string(head_dim) + 
+    //                         "current function call:" + std::to_string(batch_size) + "," + std::to_string(target_seq_len) + ","
+    //                         + std::to_string(src_seq_len) + "," + std::to_string(query_heads) + ","
+    //                         + std::to_string(kv_heads) + "," + std::to_string(head_dim) + "," + std::to_string(is_causal));
+
 
     if(head_dim == 1) {
         flash_fwd_kernel<Br, Bc, 1, BLOCK_SIZE><<<grid, block>>>(

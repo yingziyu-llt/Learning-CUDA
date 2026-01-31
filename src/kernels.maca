@@ -3,6 +3,8 @@
 
 #include "../tester/utils.h"
 
+const float INFINITY=1e30;
+
 /**
  * @brief Computes the trace of a matrix.
  *
@@ -65,10 +67,10 @@ template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t
     T *d_output;
     T h_output = 0;
     size_t size = rows * cols * sizeof(T);
-    macaMalloc((void **)&d_input, size);
-    macaMemcpy(d_input, h_input.data(), size, macaMemcpyHostToDevice);
-    macaMalloc((void **)&d_output, sizeof(T));
-    macaMemset(d_output, 0, sizeof(T));
+    mcMalloc((void **)&d_input, size);
+    mcMemcpy(d_input, h_input.data(), size, mcMemcpyHostToDevice);
+    mcMalloc((void **)&d_output, sizeof(T));
+    mcMemset(d_output, 0, sizeof(T));
     int threadsPerBlock = 256;
     int blocksPerGrid = (std::min(rows, cols) + threadsPerBlock - 1) / threadsPerBlock;
     if constexpr (std::is_same<T, int>::value) {
@@ -78,9 +80,9 @@ template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t
         trace_kernel_float<<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(float)>>>(d_input, rows, cols,
                                                                                                 d_output);
     }
-    macaMemcpy(&h_output, d_output, sizeof(T), macaMemcpyDeviceToHost);
-    macaFree(d_input);
-    macaFree(d_output);
+    mcMemcpy(&h_output, d_output, sizeof(T), mcMemcpyDeviceToHost);
+    mcFree(d_input);
+    mcFree(d_output);
     return h_output;
 }
 
@@ -575,26 +577,26 @@ void flashAttention(const std::vector<T> &h_q, const std::vector<T> &h_k, const 
     size_t v_bytes = v_elements * sizeof(T);
     size_t o_bytes = o_elements * sizeof(T);
 
-    RUNTIME_CHECK(macaMalloc(&d_q, q_bytes));
-    RUNTIME_CHECK(macaMalloc(&d_k, k_bytes));
-    RUNTIME_CHECK(macaMalloc(&d_v, v_bytes));
-    RUNTIME_CHECK(macaMalloc(&d_o, o_bytes));
+    RUNTIME_CHECK(mcMalloc(&d_q, q_bytes));
+    RUNTIME_CHECK(mcMalloc(&d_k, k_bytes));
+    RUNTIME_CHECK(mcMalloc(&d_v, v_bytes));
+    RUNTIME_CHECK(mcMalloc(&d_o, o_bytes));
 
-    RUNTIME_CHECK(macaMemcpy(d_q, h_q.data(), q_bytes, macaMemcpyHostToDevice));
-    RUNTIME_CHECK(macaMemcpy(d_k, h_k.data(), k_bytes, macaMemcpyHostToDevice));
-    RUNTIME_CHECK(macaMemcpy(d_v, h_v.data(), v_bytes, macaMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_q, h_q.data(), q_bytes, mcMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_k, h_k.data(), k_bytes, mcMemcpyHostToDevice));
+    RUNTIME_CHECK(mcMemcpy(d_v, h_v.data(), v_bytes, mcMemcpyHostToDevice));
 
     launch_flash_fwd_kernel(d_q, d_k, d_v, d_o, batch_size, target_seq_len, src_seq_len,
                              query_heads, kv_heads, head_dim, is_causal);
-    RUNTIME_CHECK(macaGetLastError());
-    RUNTIME_CHECK(macaDeviceSynchronize());
+    RUNTIME_CHECK(mcGetLastError());
+    RUNTIME_CHECK(mcDeviceSynchronize());
 
-    RUNTIME_CHECK(macaMemcpy(h_o.data(), d_o, o_bytes, macaMemcpyDeviceToHost));
+    RUNTIME_CHECK(mcMemcpy(h_o.data(), d_o, o_bytes, mcMemcpyDeviceToHost));
 
-    RUNTIME_CHECK(macaFree(d_q));
-    RUNTIME_CHECK(macaFree(d_k));
-    RUNTIME_CHECK(macaFree(d_v));
-    RUNTIME_CHECK(macaFree(d_o));
+    RUNTIME_CHECK(mcFree(d_q));
+    RUNTIME_CHECK(mcFree(d_k));
+    RUNTIME_CHECK(mcFree(d_v));
+    RUNTIME_CHECK(mcFree(d_o));
 
 }
 

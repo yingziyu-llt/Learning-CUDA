@@ -17,10 +17,12 @@
  * @param cols Number of columns in the matrix.
  * @return The trace (sum of diagonal values) of the matrix.
  */
-void __global__ trace_kernel_int(const int *d_input, size_t rows, size_t cols, int *d_output) {
+template <typename T>
+__global__ void trace_kernel(const T *d_input, size_t rows, size_t cols, T *d_output) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     int tid = threadIdx.x;
-    extern __shared__ int current_data[];
+    extern __shared__ unsigned char s_mem[]; 
+    T* current_data = reinterpret_cast<T*>(s_mem);
     if (idx >= rows || idx >= cols) {
         current_data[tid] = 0;
     } else {
@@ -38,27 +40,6 @@ void __global__ trace_kernel_int(const int *d_input, size_t rows, size_t cols, i
     }
 }
 
-void __global__ trace_kernel_float(const float *d_input, size_t rows, size_t cols, float *d_output) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
-    int tid = threadIdx.x;
-    extern __shared__ float current_data_float[];
-    if (idx >= rows || idx >= cols) {
-        current_data_float[tid] = 0;
-    } else {
-        current_data_float[tid] = d_input[idx * cols + idx];
-    }
-    __syncthreads();
-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-        if (tid < s) {
-            current_data_float[tid] += current_data_float[tid + s];
-        }
-        __syncthreads();
-    }
-    if (tid == 0) {
-        atomicAdd(d_output, current_data_float[0]);
-    }
-}
-
 template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t cols) {
     // TODO: Implement the trace function
     T *d_input;
@@ -66,18 +47,12 @@ template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t
     T h_output = 0;
     size_t size = rows * cols * sizeof(T);
     cudaMalloc((void **)&d_input, size);
-    cudaMemcpy(d_input, h_input.data(), size, cudaMemcpyHostToDevice);
+    cudaMemcpyAsync(d_input, h_input.data(), size, cudaMemcpyHostToDevice);
     cudaMalloc((void **)&d_output, sizeof(T));
     cudaMemset(d_output, 0, sizeof(T));
     int threadsPerBlock = 256;
     int blocksPerGrid = (std::min(rows, cols) + threadsPerBlock - 1) / threadsPerBlock;
-    if constexpr (std::is_same<T, int>::value) {
-        trace_kernel_int<<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(int)>>>(d_input, rows, cols,
-                                                                                            d_output);
-    } else if constexpr (std::is_same<T, float>::value) {
-        trace_kernel_float<<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(float)>>>(d_input, rows, cols,
-                                                                                                d_output);
-    }
+    trace_kernel<T><<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(T)>>>(d_input, rows, cols, d_output);
     cudaMemcpy(&h_output, d_output, sizeof(T), cudaMemcpyDeviceToHost);
     cudaFree(d_input);
     cudaFree(d_output);
@@ -117,9 +92,7 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
 
     constexpr int ROWS_PER_THREAD = (Br + BLOCK_SIZE - 1) / BLOCK_SIZE;
     
-    // ------------------------------------------------------------
     // 准备工作：加载 Q Tile
-    // ------------------------------------------------------------
     for (int i = thread_id; i < Br * D_HEAD; i += BLOCK_SIZE) {
         int row = i / D_HEAD;
         int col = i % D_HEAD;
@@ -134,7 +107,7 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
 
     // 线程私有变量：存储当前 Q 行的全局统计信息
     float m_global[ROWS_PER_THREAD];     // 全局最大值
-    float l_global[ROWS_PER_THREAD];     // 全局分母 (sum of exp)
+    float l_global[ROWS_PER_THREAD];     // 全局分母
     float acc[ROWS_PER_THREAD][D_HEAD];  // 分子累加器
 
     // 初始化
@@ -146,9 +119,7 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
 
     const float scale = 1.0f / sqrtf((float)D_HEAD);
 
-    // ============================================================
     // Pass 1: 遍历 K，计算 Global Max (m) 和 Sum Exp (l)
-    // ============================================================
     for (int col_block_start = 0; col_block_start < seq_len_k; col_block_start += Bc) {
         // Load K Tile
         for (int i = thread_id; i < Bc * D_HEAD; i += BLOCK_SIZE) {
@@ -178,26 +149,15 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
                     score += q_tile[q_local_row][d] * k_tile[k][d];
                 }
                 score *= scale;
-                
-                // 临时记录 score，稍后统一更新
-                // 注意：这里为了省显存，不存 score 数组，而是直接比较
-                // 但为了算 Sum，我们需要 exp(score - m_global)。
-                // 这里的策略是：Pass 1 只算 Max。
                 m_global[i] = fmaxf(m_global[i], score);
             }
         }
         __syncthreads();
     }
     
-    // Pass 1.5: 重新遍历一遍 K 来计算 Sum (l_global)
-    // 为了省事和精度，我们通常把 Pass 1 拆成 "找Max" 和 "算Sum"
-    // 或者，用标准的 Online Softmax 逻辑在 Pass 1 里算出准确的 m 和 l
-    // 既然之前的 Online 都有误差，我们这里采用笨办法：
-    // 再跑一遍 K 来累加 l_global，这次 m_global 是固定的！
-    
+    // 原论文里面的online方法精度过不去，这里改成苯办法，offline去做
     for (int col_block_start = 0; col_block_start < seq_len_k; col_block_start += Bc) {
-         // Reload K (由于 shared memory 被复用了，或者为了代码结构简单，重新加载)
-         // 如果 Shared Memory 够大，可以不重载，但通常不够放所有 K
+         // Reload K
         for (int i = thread_id; i < Bc * D_HEAD; i += BLOCK_SIZE) {
             int row = i / D_HEAD;
             int col = i % D_HEAD;
@@ -222,17 +182,13 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
                 float score = 0.0f;
                 for (int d = 0; d < D_HEAD; ++d) score += q_tile[q_local_row][d] * k_tile[k][d];
                 score *= scale;
-
-                // 核心：基于全局 Max 计算 exp，数值极度稳定
                 l_global[i] += expf(score - m_global[i]); 
             }
         }
         __syncthreads();
     }
 
-    // ============================================================
     // Pass 2: 再次遍历 K/V，计算分子 Accumulate(P * V)
-    // ============================================================
     for (int col_block_start = 0; col_block_start < seq_len_k; col_block_start += Bc) {
         // Load K and V
         for (int i = thread_id; i < Bc * D_HEAD; i += BLOCK_SIZE) {
@@ -275,9 +231,7 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
         __syncthreads();
     }
 
-    // ============================================================
     // Final: Write Output
-    // ============================================================
     for (int i = 0; i < ROWS_PER_THREAD; ++i) {
         int q_local_row = thread_id * ROWS_PER_THREAD + i;
         int q_global_row = q_block_start_row + q_local_row;
@@ -362,7 +316,8 @@ __global__ void flash_fwd_kernel_half(const half *Q, const half *K, const half *
         }
         __syncthreads();
 
-        // Fix 2: Intermediate scores in float
+        // 很难绷的是，half的精度过得去。所以这里用论文里面的one pass方案。
+
         float s_scores[ROWS_PER_THREAD][Bc];
         const float scale = 1.0f / sqrtf((float)D_HEAD);
 
@@ -375,7 +330,6 @@ __global__ void flash_fwd_kernel_half(const half *Q, const half *K, const half *
             for (int k_local_col = 0; k_local_col < Bc; ++k_local_col) {
                 float sum = 0.0f;
                 for (int d = 0; d < D_HEAD; ++d) {
-                    // Fix 3: Cast half to float for dot product to preserve precision
                     sum += (float)q_tile_fp16[q_local_row][d] * (float)k_tile_fp16[k_local_col][d];
                 }
                 s_scores[i][k_local_col] = sum * scale;
@@ -608,3 +562,4 @@ template void flashAttention<float>(const std::vector<float> &, const std::vecto
                                     std::vector<float> &, int, int, int, int, int, int, bool);
 template void flashAttention<half>(const std::vector<half> &, const std::vector<half> &, const std::vector<half> &,
                                    std::vector<half> &, int, int, int, int, int, int, bool);
+

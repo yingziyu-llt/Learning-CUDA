@@ -208,7 +208,7 @@ __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const flo
             continue;
         for (int d = 0; d < D_HEAD; ++d) {
             // Fix 5: Cast float accumulator back to half for output
-            O[q_global_row * stride_seq_q + q_head_idx * stride_head_q + d] = (half)o_accumulator[i][d];
+            O[q_global_row * stride_seq_q + q_head_idx * stride_head_q + d] = o_accumulator[i][d];
         }
     }
 }

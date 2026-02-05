@@ -86,31 +86,6 @@ template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t
     return h_output;
 }
 
-template <typename T> T trace(const std::vector<T> &h_input, size_t rows, size_t cols) {
-    // TODO: Implement the trace function
-    T *d_input;
-    T *d_output;
-    T h_output = 0;
-    size_t size = rows * cols * sizeof(T);
-    mcMalloc((void **)&d_input, size);
-    mcMemcpy(d_input, h_input.data(), size, mcMemcpyHostToDevice);
-    mcMalloc((void **)&d_output, sizeof(T));
-    mcMemset(d_output, 0, sizeof(T));
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (std::min(rows, cols) + threadsPerBlock - 1) / threadsPerBlock;
-    if constexpr (std::is_same<T, int>::value) {
-        trace_kernel_int<<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(int)>>>(d_input, rows, cols,
-                                                                                            d_output);
-    } else if constexpr (std::is_same<T, float>::value) {
-        trace_kernel_float<<<blocksPerGrid, threadsPerBlock, threadsPerBlock * sizeof(float)>>>(d_input, rows, cols,
-                                                                                                d_output);
-    }
-    mcMemcpy(&h_output, d_output, sizeof(T), mcMemcpyDeviceToHost);
-    mcFree(d_input);
-    mcFree(d_output);
-    return h_output;
-}
-
 template <int Br, int Bc, int D_HEAD, int BLOCK_SIZE>
 __global__ void flash_fwd_kernel_float(const float *Q, const float *K, const float *V, float *O, int batch_size,
                                        int num_q_heads, int num_kv_heads, int seq_len_q, int seq_len_k,
